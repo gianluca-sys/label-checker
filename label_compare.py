@@ -52,7 +52,7 @@ def _b64(path):
 
 # ── Claude Vision extraction ────────────────────────────────────────────────────
 EXTRACTION_PROMPT = """
-You are reading a product nutrition label. Extract EVERY field EXACTLY as printed —
+You are reading a product nutrition/supplement label. Extract EVERY field EXACTLY as printed —
 word for word, character for character. Do not paraphrase or summarise.
 
 Return ONLY a JSON object (no markdown fences, no explanation) with this structure:
@@ -69,13 +69,16 @@ Return ONLY a JSON object (no markdown fences, no explanation) with this structu
   ],
   "ingredients": "...",
   "allergens": "...",
+  "suggested_use": "...",
   "other_claims": ["..."]
 }
 
 Rules:
 - nutrients: list every row in the exact order it appears; set dv_percent to null if absent.
-- ingredients: complete text including any parenthetical sub-lists.
-- allergens: full allergen or "Contains" statement, word for word.
+- ingredients: the full text of the 'Other Ingredients' or 'Ingredients' section (inactive/excipient ingredients). On UK labels this will include all ingredients.
+- allergens: full allergen or "Contains" statement, word for word. Include any allergen warnings embedded in the ingredients text.
+- suggested_use: full text of the 'Suggested Use', 'Directions', 'Recommended Use', or 'How To Use' section.
+- net_weight: the net quantity statement (e.g. "120 Capsules", "300g", "60 Servings").
 - other_claims: certifications, warnings, storage instructions, or anything else on the label.
 - Use null for any field not present on the label.
 """.strip()
@@ -110,20 +113,19 @@ def extract(client, pdf_path):
 
 # ── Field comparison ───────────────────────────────────────────────────────────
 SIMPLE_FIELDS = [
-    ("brand_name",             "Brand Name"),
-    ("product_name",           "Product Name"),
-    ("net_weight",             "Net Weight"),
     ("serving_size",           "Serving Size"),
     ("servings_per_container", "Servings Per Container"),
+    ("net_weight",             "Units Per Container / Net Weight"),
     ("calories",               "Calories"),
-    ("ingredients",            "Ingredients"),
+    ("ingredients",            "Ingredients / Other Ingredients"),
     ("allergens",              "Allergens"),
+    ("suggested_use",          "Suggested Use / Directions"),
 ]
 
-# Fields that are always critical
+# All core fields are critical
 CRITICAL_FIELDS = {
-    "Brand Name", "Product Name", "Net Weight", "Serving Size",
-    "Servings Per Container", "Calories", "Ingredients", "Allergens",
+    "Serving Size", "Servings Per Container", "Units Per Container / Net Weight",
+    "Calories", "Ingredients / Other Ingredients", "Allergens", "Suggested Use / Directions",
 }
 
 # Keywords in a claim that make it critical
@@ -166,12 +168,73 @@ def _norm(name):
     return name
 
 
-def compare(d1, d2):
+def _amount_only(s):
+    """Strip %DV / %NRV / %RI suffix from a nutrient value (for US vs UK comparison).
+
+    Examples:
+        "500 mg (556% DV)"  → "500 mg"
+        "500 mg (625% NRV)" → "500 mg"
+        "2g"                → "2g"
+    """
+    return re.sub(
+        r"\s*\(\s*[\d.,]+\s*%\s*(?:DV|NRV|RI|RDA|DRI)?\s*\)",
+        "", str(s or ""), flags=re.IGNORECASE,
+    ).strip()
+
+
+# ── UK allergen helpers ────────────────────────────────────────────────────────
+# Each inner set = all name variants for one allergen family.
+_ALLERGEN_GROUPS = [
+    {"milk", "dairy", "lactose", "whey", "casein"},            # 0 — shared
+    {"egg", "eggs"},                                            # 1 — shared
+    {"fish", "cod", "tuna", "salmon", "halibut", "haddock"},   # 2 — shared
+    {"shellfish", "shrimp", "crab", "lobster", "prawn",
+     "crustacean"},                                            # 3 — shared
+    {"tree nut", "almond", "hazelnut", "walnut", "cashew",
+     "pecan", "brazil", "pistachio", "macadamia"},             # 4 — shared
+    {"peanut", "groundnut"},                                    # 5 — shared
+    {"wheat", "gluten", "barley", "rye", "oat", "spelt",
+     "kamut"},                                                  # 6 — shared
+    {"soy", "soya", "soybean"},                                 # 7 — shared
+    {"sesame"},                                                 # 8 — shared
+    {"celery", "celeriac"},                                     # 9 — UK only
+    {"lupin"},                                                  # 10 — UK only
+    {"mollusc", "mussel", "oyster", "squid", "snail", "clam",
+     "octopus"},                                               # 11 — UK only
+    {"mustard"},                                               # 12 — UK only
+    {"sulphite", "sulphur dioxide", "sulfite",
+     "sulfur dioxide"},                                        # 13 — UK only
+]
+
+# Group indices that are UK-specific (absent from US label is EXPECTED)
+_UK_ONLY_INDICES = {9, 10, 11, 12, 13}
+
+
+def _allergen_groups_present(text):
+    """Return the set of allergen group indices whose keywords appear in text."""
+    text = (text or "").lower()
+    return {i for i, grp in enumerate(_ALLERGEN_GROUPS) if any(kw in text for kw in grp)}
+
+
+def compare(d1, d2, mode="us_us"):
+    """Compare two extracted label dicts.
+
+    mode:
+        "us_us"  — standard US-to-US comparison (default)
+        "us_uk"  — US label vs UK label; handles allergen name differences,
+                   %DV vs %NRV, and expected structural differences
+    """
+    uk_mode = (mode == "us_uk")
     diffs, matches = [], []
 
     for key, label in SIMPLE_FIELDS:
         v1 = str(d1.get(key) or "").strip()
         v2 = str(d2.get(key) or "").strip()
+
+        # Allergens handled separately below (smart matching in UK mode)
+        if key == "allergens":
+            continue
+
         entry = {
             "category": "Field",
             "field": label,
@@ -179,16 +242,30 @@ def compare(d1, d2):
             "new": v2 or "(not present)",
             "critical": label in CRITICAL_FIELDS,
         }
+
+        # UK mode: ingredients structure differs by design — note it but still flag value changes
+        if uk_mode and key == "ingredients":
+            if v1 != v2:
+                entry["new"] = (
+                    f"{v2 or '(not present)'}\n"
+                    "ℹ️ Note: UK labels combine active + inactive ingredients in one list "
+                    "— structural differences are expected; check that all ingredients are present"
+                )
+                diffs.append(entry)
+            else:
+                matches.append({**entry, "value": v1 or "(not present)"})
+            continue
+
         if v1 != v2:
             diffs.append(entry)
         else:
             matches.append({**entry, "value": v1 or "(not present)"})
 
-    # Nutrients — match by normalised name to avoid false positives from spacing differences
+    # ── Nutrients ──────────────────────────────────────────────────────────────
+    # In UK mode: compare amounts only — strip %DV vs %NRV/%RI differences
     n1_raw = {n["name"]: n for n in (d1.get("nutrients") or [])}
     n2_raw = {n["name"]: n for n in (d2.get("nutrients") or [])}
 
-    # Build normalised → original name maps
     n1_norm = {_norm(k): k for k in n1_raw}
     n2_norm = {_norm(k): k for k in n2_raw}
 
@@ -206,33 +283,104 @@ def compare(d1, d2):
         current_val = _nutrient_str(n1_raw[orig1]) if orig1 else "(not present)"
         new_val     = _nutrient_str(n2_raw[orig2]) if orig2 else "(removed)"
 
+        # UK mode: compare amounts only, ignoring %DV vs %NRV/%RI
+        cmp_current = _amount_only(current_val) if uk_mode else current_val
+        cmp_new     = _amount_only(new_val)     if uk_mode else new_val
+
         entry = {"category": "Nutrient", "field": display_name,
                  "current": current_val, "new": new_val, "critical": True}
-        if current_val != new_val:
+        if cmp_current != cmp_new:
             diffs.append(entry)
         else:
             matches.append({**entry, "value": current_val})
 
-    # Other claims
-    c1 = set(d1.get("other_claims") or [])
-    c2 = set(d2.get("other_claims") or [])
-    for claim in sorted(c1 - c2):
-        entry = {"category": "Claim", "field": "Claim", "current": claim, "new": "(removed)"}
-        entry["critical"] = _is_critical("Claim", "Claim", claim, "(removed)")
-        diffs.append(entry)
-    for claim in sorted(c2 - c1):
-        entry = {"category": "Claim", "field": "Claim", "current": "(not present)", "new": claim}
-        entry["critical"] = _is_critical("Claim", "Claim", "(not present)", claim)
-        diffs.append(entry)
-    for claim in sorted(c1 & c2):
-        matches.append({"category": "Claim", "field": "Claim", "value": claim,
-                        "current": claim, "new": claim, "critical": False})
+    # ── Allergens ─────────────────────────────────────────────────────────────
+    a1 = str(d1.get("allergens") or "").strip()
+    a2 = str(d2.get("allergens") or "").strip()
+
+    if uk_mode:
+        # Smart allergen comparison: keyword-group matching across US/UK name variants
+        groups_us = _allergen_groups_present(a1)
+        groups_uk = _allergen_groups_present(a2)
+
+        # US allergen absent from UK label → CRITICAL
+        for i in (groups_us - groups_uk):
+            sample = next(iter(_ALLERGEN_GROUPS[i]))
+            diffs.append({
+                "category": "Allergen",
+                "field": f"Allergen — {sample}",
+                "current": "Declared on US label",
+                "new": "⚠️ NOT FOUND on UK label — must be declared",
+                "critical": True,
+            })
+
+        # UK has allergen not in US, and it's not a UK-only one → possible reformulation
+        for i in (groups_uk - groups_us - _UK_ONLY_INDICES):
+            sample = next(iter(_ALLERGEN_GROUPS[i]))
+            diffs.append({
+                "category": "Allergen",
+                "field": f"Allergen — {sample}",
+                "current": "Not declared on US label",
+                "new": "Declared on UK label — verify formulation is unchanged",
+                "critical": True,
+            })
+
+        # UK-only allergens present → expected additions, just log
+        for i in (groups_uk & _UK_ONLY_INDICES):
+            sample = next(iter(_ALLERGEN_GROUPS[i]))
+            matches.append({
+                "category": "Allergen",
+                "field": f"Allergen — {sample} (UK-only)",
+                "value": "Present on UK label (UK-specific requirement — expected)",
+                "current": "(UK-only — not required on US label)",
+                "new": "Declared on UK label ✓",
+                "critical": False,
+            })
+
+        # If all US allergens confirmed, add a summary match row
+        if not (groups_us - groups_uk) and not (groups_uk - groups_us - _UK_ONLY_INDICES):
+            matches.append({
+                "category": "Field", "field": "Allergens",
+                "value": "All US allergens confirmed on UK label",
+                "current": a1 or "(not present)",
+                "new": a2 or "(not present)",
+                "critical": False,
+            })
+    else:
+        # Standard exact comparison
+        entry = {
+            "category": "Field", "field": "Allergens",
+            "current": a1 or "(not present)",
+            "new": a2 or "(not present)",
+            "critical": True,
+        }
+        if a1 != a2:
+            diffs.append(entry)
+        else:
+            matches.append({**entry, "value": a1 or "(not present)"})
+
+    # ── Other claims (US-US only — claims legitimately differ between markets) ─
+    if not uk_mode:
+        c1 = set(d1.get("other_claims") or [])
+        c2 = set(d2.get("other_claims") or [])
+        for claim in sorted(c1 - c2):
+            entry = {"category": "Claim", "field": "Claim", "current": claim, "new": "(removed)"}
+            entry["critical"] = _is_critical("Claim", "Claim", claim, "(removed)")
+            diffs.append(entry)
+        for claim in sorted(c2 - c1):
+            entry = {"category": "Claim", "field": "Claim", "current": "(not present)", "new": claim}
+            entry["critical"] = _is_critical("Claim", "Claim", "(not present)", claim)
+            diffs.append(entry)
+        for claim in sorted(c1 & c2):
+            matches.append({"category": "Claim", "field": "Claim", "value": claim,
+                            "current": claim, "new": claim, "critical": False})
 
     return {
         "differences": diffs,
         "matches": matches,
         "total_differences": len(diffs),
         "total_matches": len(matches),
+        "mode": mode,
     }
 
 

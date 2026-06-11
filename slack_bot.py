@@ -218,13 +218,16 @@ Return ONLY a JSON object (no markdown, no explanation) with this structure:
   "nutrients": [{"name": "...", "amount": "...", "dv_percent": "..."}],
   "ingredients": "...",
   "allergens": "...",
+  "suggested_use": "...",
   "other_claims": ["..."]
 }
 
 Rules:
 - If text is split across multiple photos, combine what is visible.
 - Use null for any field not visible in any photo.
-- Extract nutrients in the order they appear on the label."""
+- Extract nutrients in the order they appear on the label.
+- suggested_use: full text of 'Suggested Use', 'Directions', 'Recommended Use', or 'How To Use'.
+- allergens: include any allergen warnings embedded within the ingredients text."""
 
 
 def extract_from_images(client, image_paths):
@@ -253,17 +256,19 @@ def extract_from_images(client, image_paths):
 
 
 # ── Slack result formatter ─────────────────────────────────────────────────────
-def _format_result(sku, name1, name2, result, mode):
+def _format_result(sku, name1, name2, result, mode, comp_mode="us_us"):
     total_d = result["total_differences"]
     total_m = result["total_matches"]
     diffs   = result["differences"]
 
+    uk_tag = "  🇬🇧 _US → UK comparison_" if comp_mode == "us_uk" else ""
+
     if mode == "warehouse":
-        header2 = f"PDF: `{name1}`   Warehouse: `{name2}`"
+        header2 = f"PDF: `{name1}`   Warehouse: `{name2}`{uk_tag}"
     elif mode == "warehouse_vs_warehouse":
-        header2 = f"Set 1: `{name1}`   Set 2: `{name2}`"
+        header2 = f"Set 1: `{name1}`   Set 2: `{name2}`{uk_tag}"
     else:
-        header2 = f"Current: `{name1}`   New: `{name2}`"
+        header2 = f"US label: `{name1}`   {'UK label' if comp_mode == 'us_uk' else 'New label'}: `{name2}`{uk_tag}"
 
     lines = [
         f"*Label Check — {sku}*",
@@ -374,7 +379,7 @@ def _download_drive_images(folder_id, dest_dir):
 
 
 # ── Mode 1: PDF vs PDF ─────────────────────────────────────────────────────────
-def _process_pdf_vs_pdf(client, sku, file1, file2, channel, thread_ts):
+def _process_pdf_vs_pdf(client, sku, file1, file2, channel, thread_ts, comp_mode="us_us"):
     try:
         ac = anthropic.Anthropic()
         with tempfile.TemporaryDirectory() as tmp:
@@ -384,10 +389,11 @@ def _process_pdf_vs_pdf(client, sku, file1, file2, channel, thread_ts):
             _download(file2["url_private_download"], path2)
             d1     = extract(ac, path1)
             d2     = extract(ac, path2)
-            result = compare(d1, d2)
+            result = compare(d1, d2, mode=comp_mode)
 
-        text   = _format_result(sku, file1["name"], file2["name"], result, "pdf")
-        logged = _log_to_sheets(sku, file1["name"], file2["name"], result, "Label vs Label")
+        display_mode = "Label vs Label (US→UK)" if comp_mode == "us_uk" else "Label vs Label"
+        text   = _format_result(sku, file1["name"], file2["name"], result, "pdf", comp_mode)
+        logged = _log_to_sheets(sku, file1["name"], file2["name"], result, display_mode)
         if logged:
             text += "\n\n📊  _Logged to Google Sheets_"
         client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=text)
@@ -398,7 +404,7 @@ def _process_pdf_vs_pdf(client, sku, file1, file2, channel, thread_ts):
 
 
 # ── Mode 2: PDF vs Warehouse photos ───────────────────────────────────────────
-def _process_pdf_vs_warehouse(client, sku, pdf_file, image_files, channel, thread_ts):
+def _process_pdf_vs_warehouse(client, sku, pdf_file, image_files, channel, thread_ts, comp_mode="us_us"):
     try:
         ac = anthropic.Anthropic()
         with tempfile.TemporaryDirectory() as tmp:
@@ -413,11 +419,12 @@ def _process_pdf_vs_warehouse(client, sku, pdf_file, image_files, channel, threa
 
             d_pdf       = extract(ac, pdf_path)
             d_warehouse = extract_from_images(ac, img_paths)
-            result      = compare(d_pdf, d_warehouse)
+            result      = compare(d_pdf, d_warehouse, mode=comp_mode)
 
-        photo_names = ", ".join(f["name"] for f in image_files)
-        text        = _format_result(sku, pdf_file["name"], photo_names, result, "warehouse")
-        logged      = _log_to_sheets(sku, pdf_file["name"], photo_names, result, "Label vs Warehouse")
+        photo_names  = ", ".join(f["name"] for f in image_files)
+        display_mode = "Label vs Warehouse (US→UK)" if comp_mode == "us_uk" else "Label vs Warehouse"
+        text         = _format_result(sku, pdf_file["name"], photo_names, result, "warehouse", comp_mode)
+        logged       = _log_to_sheets(sku, pdf_file["name"], photo_names, result, display_mode)
         if logged:
             text += "\n\n📊  _Logged to Google Sheets_"
         client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=text)
@@ -428,7 +435,7 @@ def _process_pdf_vs_warehouse(client, sku, pdf_file, image_files, channel, threa
 
 
 # ── Mode 4: Warehouse vs Warehouse (2 Drive folders) ──────────────────────────
-def _process_warehouse_vs_warehouse(client, sku, folder_id1, folder_id2, channel, thread_ts):
+def _process_warehouse_vs_warehouse(client, sku, folder_id1, folder_id2, channel, thread_ts, comp_mode="us_us"):
     try:
         ac = anthropic.Anthropic()
         with tempfile.TemporaryDirectory() as tmp:
@@ -442,16 +449,17 @@ def _process_warehouse_vs_warehouse(client, sku, folder_id1, folder_id2, channel
 
             d1 = extract_from_images(ac, paths1)
             d2 = extract_from_images(ac, paths2)
-            result = compare(d1, d2)
+            result = compare(d1, d2, mode=comp_mode)
 
+        display_mode = "Warehouse vs Warehouse (US→UK)" if comp_mode == "us_uk" else "Warehouse vs Warehouse"
         text   = _format_result(sku,
                                 f"Folder 1 ({len(paths1)} photos)",
                                 f"Folder 2 ({len(paths2)} photos)",
-                                result, "warehouse_vs_warehouse")
+                                result, "warehouse_vs_warehouse", comp_mode)
         logged = _log_to_sheets(sku,
                                 f"Drive:{folder_id1}",
                                 f"Drive:{folder_id2}",
-                                result, "Warehouse vs Warehouse")
+                                result, display_mode)
         if logged:
             text += "\n\n📊  _Logged to Google Sheets_"
         client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=text)
@@ -462,7 +470,7 @@ def _process_warehouse_vs_warehouse(client, sku, folder_id1, folder_id2, channel
 
 
 # ── Mode 3: PDF vs Google Drive folder ────────────────────────────────────────
-def _process_pdf_vs_drive(client, sku, pdf_file, folder_id, channel, thread_ts):
+def _process_pdf_vs_drive(client, sku, pdf_file, folder_id, channel, thread_ts, comp_mode="us_us"):
     try:
         ac = anthropic.Anthropic()
         with tempfile.TemporaryDirectory() as tmp:
@@ -473,13 +481,13 @@ def _process_pdf_vs_drive(client, sku, pdf_file, folder_id, channel, thread_ts):
 
             d_pdf       = extract(ac, pdf_path)
             d_warehouse = extract_from_images(ac, img_paths)
-            result      = compare(d_pdf, d_warehouse)
+            result      = compare(d_pdf, d_warehouse, mode=comp_mode)
 
-        img_names = ", ".join(Path(p).name for p in img_paths)
+        display_mode = "Label vs Drive Folder (US→UK)" if comp_mode == "us_uk" else "Label vs Drive Folder"
         text      = _format_result(sku, pdf_file["name"],
-                                   f"Drive folder ({len(img_paths)} photos)", result, "warehouse")
+                                   f"Drive folder ({len(img_paths)} photos)", result, "warehouse", comp_mode)
         logged    = _log_to_sheets(sku, pdf_file["name"], f"Drive:{folder_id}",
-                                   result, "Label vs Drive Folder")
+                                   result, display_mode)
         if logged:
             text += "\n\n📊  _Logged to Google Sheets_"
         client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=text)
@@ -501,31 +509,38 @@ def handle_message(event, client):
     img_files   = [f for f in files if f.get("mimetype") in IMAGE_MIMETYPES]
     folder_ids  = DRIVE_FOLDER_RE.findall(raw_text)
 
-    # SKU = message text with all Drive URLs and Slack URL formatting stripped out
-    sku = re.sub(r"<https?://[^>]*>", "", raw_text)  # strip <https://...> Slack formatting
-    sku = DRIVE_FOLDER_RE.sub("", sku).strip() or "UNKNOWN-SKU"
+    # UK mode: triggered by including "UK" anywhere in the message text
+    uk_mode = bool(re.search(r'\bUK\b', raw_text, re.IGNORECASE))
+    comp_mode = "us_uk" if uk_mode else "us_us"
+
+    # SKU = message text stripped of Drive URLs, Slack URL formatting, and "UK" flag
+    sku = re.sub(r"<https?://[^>]*>", "", raw_text)
+    sku = DRIVE_FOLDER_RE.sub("", sku)
+    sku = re.sub(r'\bUK\b', '', sku, flags=re.IGNORECASE).strip() or "UNKNOWN-SKU"
+
+    mode_label = " 🇬🇧 *US → UK mode*" if uk_mode else ""
 
     # Mode 1: exactly 2 PDFs
     if len(pdf_files) == 2 and len(img_files) == 0:
         client.chat_postMessage(
             channel=channel, thread_ts=ts,
-            text=f"📋  Comparing labels for *{sku}* — give me ~30 seconds…",
+            text=f"📋  Comparing labels for *{sku}*{mode_label} — give me ~30 seconds…",
         )
         threading.Thread(
             target=_process_pdf_vs_pdf,
-            args=(client, sku, pdf_files[0], pdf_files[1], channel, ts),
+            args=(client, sku, pdf_files[0], pdf_files[1], channel, ts, comp_mode),
             daemon=True,
         ).start()
 
-    # Mode 2: 1 PDF + 1–4 images attached directly
-    elif len(pdf_files) == 1 and 1 <= len(img_files) <= 4:
+    # Mode 2: 1 PDF + 1–20 images attached directly
+    elif len(pdf_files) == 1 and 1 <= len(img_files) <= 20:
         client.chat_postMessage(
             channel=channel, thread_ts=ts,
-            text=f"📸  Checking warehouse photos against PDF label for *{sku}* — give me ~45 seconds…",
+            text=f"📸  Checking warehouse photos against PDF label for *{sku}*{mode_label} — give me ~45 seconds…",
         )
         threading.Thread(
             target=_process_pdf_vs_warehouse,
-            args=(client, sku, pdf_files[0], img_files, channel, ts),
+            args=(client, sku, pdf_files[0], img_files, channel, ts, comp_mode),
             daemon=True,
         ).start()
 
@@ -533,11 +548,11 @@ def handle_message(event, client):
     elif len(pdf_files) == 1 and len(folder_ids) == 1:
         client.chat_postMessage(
             channel=channel, thread_ts=ts,
-            text=f"📂  Fetching images from Drive and checking against PDF for *{sku}* — give me ~45 seconds…",
+            text=f"📂  Fetching images from Drive and checking against PDF for *{sku}*{mode_label} — give me ~45 seconds…",
         )
         threading.Thread(
             target=_process_pdf_vs_drive,
-            args=(client, sku, pdf_files[0], folder_ids[0], channel, ts),
+            args=(client, sku, pdf_files[0], folder_ids[0], channel, ts, comp_mode),
             daemon=True,
         ).start()
 
@@ -545,11 +560,11 @@ def handle_message(event, client):
     elif len(pdf_files) == 0 and len(folder_ids) == 2:
         client.chat_postMessage(
             channel=channel, thread_ts=ts,
-            text=f"📂  Comparing two warehouse photo sets for *{sku}* — give me ~60 seconds…",
+            text=f"📂  Comparing two warehouse photo sets for *{sku}*{mode_label} — give me ~60 seconds…",
         )
         threading.Thread(
             target=_process_warehouse_vs_warehouse,
-            args=(client, sku, folder_ids[0], folder_ids[1], channel, ts),
+            args=(client, sku, folder_ids[0], folder_ids[1], channel, ts, comp_mode),
             daemon=True,
         ).start()
 
@@ -563,6 +578,7 @@ def handle_message(event, client):
                 "• *1 PDF + 1–20 photos* — checks warehouse product against the PDF label\n"
                 "• *1 PDF + Drive folder link* — bot pulls images from Drive automatically\n"
                 "• *2 Drive folder links (no PDF)* — compares two sets of warehouse photos\n\n"
+                "Add *UK* to your message to run a US vs UK comparison.\n"
                 "Make sure to type the SKU as the message text."
             ),
         )
