@@ -122,8 +122,8 @@ def _log_to_sheets(sku, name1, name2, result, mode):
 
         # ── Change Log tab (one row per run) ──────────────────────────────────
         ws_log = _ensure_ws(sh, "Change Log", 1000, 8,
-                            ["Timestamp", "SKU", "Mode", "Source 1", "Source 2",
-                             "Changes Found", "Total Fields", "Status"])
+                            ["Timestamp", "SKU", "Mode", "Source 1 / US Label",
+                             "Source 2 / UK Label", "Changes Found", "Total Fields", "Status"])
         ws_log.append_row([
             ts, sku, mode, name1, name2,
             result["total_differences"],
@@ -151,15 +151,18 @@ def _log_to_sheets(sku, name1, name2, result, mode):
         })
 
         # Row 2 — metadata
-        ws_sku.append_row([f"Run: {ts}", f"Mode: {mode}", f"Source 1: {name1}",
-                           f"Source 2: {name2}", f"Status: {status}"])
+        uk_mode_log = "US→UK" in mode
+        src1_label  = "US Label" if uk_mode_log else "Source 1"
+        src2_label  = "UK Label" if uk_mode_log else "Source 2"
+        ws_sku.append_row([f"Run: {ts}", f"Mode: {mode}", f"{src1_label}: {name1}",
+                           f"{src2_label}: {name2}", f"Status: {status}"])
         ws_sku.format("A2:E2", {
             "textFormat": {"italic": True, "fontSize": 10},
             "backgroundColor": {"red": 0.847, "green": 0.953, "blue": 0.863},
         })
 
         # Row 3 — column headers
-        ws_sku.append_row(["Category", "Field", "Source 1", "Source 2", "Status"])
+        ws_sku.append_row(["Category", "Field", src1_label, src2_label, "Status"])
         ws_sku.format("A3:E3", {
             "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
             "backgroundColor": {"red": 0.176, "green": 0.416, "blue": 0.310},
