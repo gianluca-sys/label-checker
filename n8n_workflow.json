@@ -1,0 +1,219 @@
+{
+  "name": "Healf Label Checker",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "healf-label-check",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "node-webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 300],
+      "webhookId": "healf-label-check",
+      "notes": "Accepts POST with JSON body: { label1_base64, label2_base64, sku }\nBoth PDF files must be base64-encoded strings."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "anthropic-version", "value": "2023-06-01" },
+            { "name": "content-type",      "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"claude-opus-4-8\",\n  \"max_tokens\": 4096,\n  \"messages\": [{\n    \"role\": \"user\",\n    \"content\": [\n      {\n        \"type\": \"document\",\n        \"source\": {\n          \"type\": \"base64\",\n          \"media_type\": \"application/pdf\",\n          \"data\": \"{{ $json.body.label1_base64 }}\"\n        }\n      },\n      {\n        \"type\": \"text\",\n        \"text\": \"Extract every field from this nutrition label exactly as printed. Return ONLY valid JSON with these keys: brand_name, product_name, net_weight, serving_size, servings_per_container, calories, nutrients (array of {name, amount, dv_percent}), ingredients, allergens, other_claims (array). Use null for absent fields. No markdown, no explanation — JSON only.\"\n      }\n    ]\n  }]\n}",
+        "options": {}
+      },
+      "id": "node-extract-label1",
+      "name": "Extract Label 1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [440, 200],
+      "notes": "Calls Claude API to extract all fields from label 1.\nCredential: create an HTTP Header Auth credential named 'Anthropic API'\nwith header name 'x-api-key' and your Anthropic API key as the value."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "save-label1",
+              "name": "label1_data",
+              "value": "={{ JSON.parse($json.content[0].text.match(/\\{[\\s\\S]*\\}/)[0]) }}",
+              "type": "object"
+            },
+            {
+              "id": "save-sku",
+              "name": "sku",
+              "value": "={{ $('Webhook').first().json.body.sku }}",
+              "type": "string"
+            },
+            {
+              "id": "save-label2-b64",
+              "name": "label2_base64",
+              "value": "={{ $('Webhook').first().json.body.label2_base64 }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-save-label1",
+      "name": "Save Label 1 Data",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3,
+      "position": [660, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "anthropic-version", "value": "2023-06-01" },
+            { "name": "content-type",      "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"claude-opus-4-8\",\n  \"max_tokens\": 4096,\n  \"messages\": [{\n    \"role\": \"user\",\n    \"content\": [\n      {\n        \"type\": \"document\",\n        \"source\": {\n          \"type\": \"base64\",\n          \"media_type\": \"application/pdf\",\n          \"data\": \"{{ $json.label2_base64 }}\"\n        }\n      },\n      {\n        \"type\": \"text\",\n        \"text\": \"Extract every field from this nutrition label exactly as printed. Return ONLY valid JSON with these keys: brand_name, product_name, net_weight, serving_size, servings_per_container, calories, nutrients (array of {name, amount, dv_percent}), ingredients, allergens, other_claims (array). Use null for absent fields. No markdown, no explanation — JSON only.\"\n      }\n    ]\n  }]\n}",
+        "options": {}
+      },
+      "id": "node-extract-label2",
+      "name": "Extract Label 2",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [880, 200]
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Pull extracted label data from upstream nodes\nconst label1 = $('Save Label 1 Data').first().json.label1_data;\nconst sku    = $('Save Label 1 Data').first().json.sku;\nconst raw2   = $input.first().json.content[0].text;\nconst label2 = JSON.parse(raw2.match(/\\{[\\s\\S]*\\}/)[0]);\n\nconst SIMPLE = [\n  ['brand_name',             'Brand Name'],\n  ['product_name',           'Product Name'],\n  ['net_weight',             'Net Weight'],\n  ['serving_size',           'Serving Size'],\n  ['servings_per_container', 'Servings Per Container'],\n  ['calories',               'Calories'],\n  ['ingredients',            'Ingredients'],\n  ['allergens',              'Allergens'],\n];\n\nfunction nutrientStr(n) {\n  let s = String(n.amount || '');\n  if (n.dv_percent) s += ` (${n.dv_percent}% DV)`;\n  return s;\n}\n\nconst differences = [];\nconst matches     = [];\n\nfor (const [key, label] of SIMPLE) {\n  const v1 = String(label1[key] || '').trim();\n  const v2 = String(label2[key] || '').trim();\n  const entry = { category: 'Field', field: label, current: v1 || '(not present)', new: v2 || '(not present)' };\n  if (v1 !== v2) differences.push(entry);\n  else           matches.push({ ...entry, value: v1 || '(not present)' });\n}\n\nconst n1 = {}; for (const n of (label1.nutrients || [])) n1[n.name] = n;\nconst n2 = {}; for (const n of (label2.nutrients || [])) n2[n.name] = n;\nconst seen = {};\nfor (const name of [...Object.keys(n1), ...Object.keys(n2).filter(k => !n1[k])]) {\n  if (seen[name]) continue;\n  seen[name] = true;\n  const curr = name in n1 ? nutrientStr(n1[name]) : '(not present)';\n  const next = name in n2 ? nutrientStr(n2[name]) : '(removed)';\n  const entry = { category: 'Nutrient', field: name, current: curr, new: next };\n  if (curr !== next) differences.push(entry);\n  else               matches.push({ ...entry, value: curr });\n}\n\nconst c1 = new Set(label1.other_claims || []);\nconst c2 = new Set(label2.other_claims || []);\nfor (const c of c1) if (!c2.has(c)) differences.push({ category: 'Claim', field: 'Claim', current: c, new: '(removed)' });\nfor (const c of c2) if (!c1.has(c)) differences.push({ category: 'Claim', field: 'Claim', current: '(not present)', new: c });\nfor (const c of c1) if (c2.has(c))  matches.push({ category: 'Claim', field: 'Claim', value: c, current: c, new: c });\n\nreturn [{ json: { sku, differences, matches, total_differences: differences.length, total_matches: matches.length } }];"
+      },
+      "id": "node-compare",
+      "name": "Compare Labels",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 300]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID_HERE",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Change Log",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Timestamp":      "={{ $now.format('yyyy-MM-dd HH:mm') }}",
+            "SKU":            "={{ $json.sku }}",
+            "Changes Found":  "={{ $json.total_differences }}",
+            "Total Fields":   "={{ $json.total_differences + $json.total_matches }}",
+            "Status":         "={{ $json.total_differences > 0 ? 'CHANGES' : 'MATCH' }}",
+            "Differences":    "={{ $json.differences.map(d => d.field + ': ' + d.current + ' → ' + d.new).join(' | ') }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "node-sheets",
+      "name": "Log to Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [1320, 300],
+      "notes": "SETUP REQUIRED:\n1. Replace YOUR_GOOGLE_SHEET_ID_HERE with your sheet's ID (from its URL)\n2. Create a Google Sheets OAuth2 credential in n8n\n3. Make sure the sheet has a tab named 'Change Log' with these column headers:\n   Timestamp | SKU | Changes Found | Total Fields | Status | Differences"
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "YOUR_SLACK_CHANNEL_ID",
+          "mode": "id"
+        },
+        "text": "=*Label Check — {{ $('Compare Labels').first().json.sku }}*\n\n{{ $('Compare Labels').first().json.total_differences > 0 ? ':red_circle: *' + $('Compare Labels').first().json.total_differences + ' change(s) found*' : ':large_green_circle: *Labels match — no changes*' }}\n\n{{ $('Compare Labels').first().json.differences.slice(0, 10).map(d => '• *' + d.field + '*: `' + d.current.substring(0, 60) + '` → `' + d.new.substring(0, 60) + '`').join('\\n') }}{{ $('Compare Labels').first().json.total_differences > 10 ? '\\n_...and ' + ($('Compare Labels').first().json.total_differences - 10) + ' more. See the full report in Google Sheets._' : '' }}",
+        "options": {}
+      },
+      "id": "node-slack",
+      "name": "Notify Slack",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2,
+      "position": [1540, 300],
+      "notes": "SETUP REQUIRED:\n1. Replace YOUR_SLACK_CHANNEL_ID with your compliance/design channel ID\n   (right-click the channel in Slack → View channel details → copy the ID at the bottom)\n2. Create a Slack OAuth2 credential in n8n"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ sku: $('Compare Labels').first().json.sku, total_differences: $('Compare Labels').first().json.total_differences, total_matches: $('Compare Labels').first().json.total_matches, status: $('Compare Labels').first().json.total_differences > 0 ? 'CHANGES' : 'MATCH', differences: $('Compare Labels').first().json.differences }) }}",
+        "options": {}
+      },
+      "id": "node-respond",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1760, 300]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [[{ "node": "Extract Label 1", "type": "main", "index": 0 }]]
+    },
+    "Extract Label 1": {
+      "main": [[{ "node": "Save Label 1 Data", "type": "main", "index": 0 }]]
+    },
+    "Save Label 1 Data": {
+      "main": [[{ "node": "Extract Label 2", "type": "main", "index": 0 }]]
+    },
+    "Extract Label 2": {
+      "main": [[{ "node": "Compare Labels", "type": "main", "index": 0 }]]
+    },
+    "Compare Labels": {
+      "main": [[{ "node": "Log to Google Sheets", "type": "main", "index": 0 }]]
+    },
+    "Log to Google Sheets": {
+      "main": [[{ "node": "Notify Slack", "type": "main", "index": 0 }]]
+    },
+    "Notify Slack": {
+      "main": [[{ "node": "Respond", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "1",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "__README__": {
+    "overview": "Healf Label Checker — n8n workflow",
+    "setup_steps": [
+      "1. Import this file into n8n (Workflows → Import from file)",
+      "2. In the 'Log to Google Sheets' node: replace YOUR_GOOGLE_SHEET_ID_HERE with your sheet's ID",
+      "3. In the 'Notify Slack' node: replace YOUR_SLACK_CHANNEL_ID with your channel's ID",
+      "4. Create credentials in n8n: Anthropic HTTP Header Auth, Google Sheets OAuth2, Slack OAuth2",
+      "5. Activate the workflow — the webhook URL appears in the Webhook node",
+      "6. Trigger it by POSTing JSON: { label1_base64: '...', label2_base64: '...', sku: 'SKU-001' }"
+    ],
+    "anthropic_credential": "HTTP Header Auth — header name: x-api-key, value: your Anthropic API key",
+    "encoding_pdfs": "To base64-encode a PDF before sending: python -c \"import base64; print(base64.b64encode(open('label.pdf','rb').read()).decode())\""
+  }
+}

@@ -1,0 +1,7 @@
+google_credentials.json
+.env
+*.pyc
+__pycache__/
+*.xlsx
+labels/
+*.pdf

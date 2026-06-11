@@ -1,0 +1,6 @@
+anthropic
+slack-bolt
+gspread
+google-auth
+google-api-python-client
+openpyxl
