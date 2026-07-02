@@ -512,16 +512,34 @@ def handle_message(event, client):
     img_files   = [f for f in files if f.get("mimetype") in IMAGE_MIMETYPES]
     folder_ids  = DRIVE_FOLDER_RE.findall(raw_text)
 
-    # UK mode: triggered by including "UK" anywhere in the message text
-    uk_mode = bool(re.search(r'\bUK\b', raw_text, re.IGNORECASE))
-    comp_mode = "us_uk" if uk_mode else "us_us"
+    # Detect comparison type from "US vs US" or "US vs UK" prefix
+    is_us_uk = bool(re.search(r'US\s+vs\s+UK', raw_text, re.IGNORECASE))
+    is_us_us = bool(re.search(r'US\s+vs\s+US', raw_text, re.IGNORECASE))
 
-    # SKU = message text stripped of Drive URLs, Slack URL formatting, and "UK" flag
+    # If files/folders are attached but no mode specified, ask the user to clarify
+    has_content = len(pdf_files) > 0 or len(img_files) > 0 or len(folder_ids) > 0
+    if has_content and not is_us_uk and not is_us_us:
+        client.chat_postMessage(
+            channel=channel, thread_ts=ts,
+            text=(
+                "⚠️  Please specify the comparison type at the start of your message:\n\n"
+                "• *US vs US*  `DFH-MGC-120` — comparing two US labels\n"
+                "• *US vs UK*  `DFH-MGC-120` — comparing a US label against a UK label\n\n"
+                "Attach your files again with the correct prefix and I'll get started."
+            ),
+        )
+        return
+
+    comp_mode = "us_uk" if is_us_uk else "us_us"
+
+    # SKU = message text stripped of mode prefix, Drive URLs, and Slack URL formatting
     sku = re.sub(r"<https?://[^>]*>", "", raw_text)
     sku = DRIVE_FOLDER_RE.sub("", sku)
-    sku = re.sub(r'\bUK\b', '', sku, flags=re.IGNORECASE).strip() or "UNKNOWN-SKU"
+    sku = re.sub(r'US\s+vs\s+UK', '', sku, flags=re.IGNORECASE)
+    sku = re.sub(r'US\s+vs\s+US', '', sku, flags=re.IGNORECASE)
+    sku = sku.strip() or "UNKNOWN-SKU"
 
-    mode_label = " 🇬🇧 *US → UK mode*" if uk_mode else ""
+    mode_label = "  🇬🇧 *US vs UK*" if is_us_uk else "  🇺🇸 *US vs US*"
 
     # Mode 1: exactly 2 PDFs
     if len(pdf_files) == 2 and len(img_files) == 0:
@@ -576,13 +594,14 @@ def handle_message(event, client):
         client.chat_postMessage(
             channel=channel, thread_ts=ts,
             text=(
-                "⚠️  I wasn't sure what to do with those files. Here's what I accept:\n"
-                "• *2 PDFs* — compares two labels\n"
-                "• *1 PDF + 1–20 photos* — checks warehouse product against the PDF label\n"
-                "• *1 PDF + Drive folder link* — bot pulls images from Drive automatically\n"
-                "• *2 Drive folder links (no PDF)* — compares two sets of warehouse photos\n\n"
-                "Add *UK* to your message to run a US vs UK comparison.\n"
-                "Make sure to type the SKU as the message text."
+                "⚠️  I wasn't sure what to do with those files. Here's what I accept:\n\n"
+                "*Format:*  `US vs US  SKU`  or  `US vs UK  SKU`\n\n"
+                "*Then attach one of:*\n"
+                "• 2 PDFs — label vs label\n"
+                "• 1 PDF + 1–20 photos — PDF vs warehouse photos\n"
+                "• 1 PDF + Drive folder link — PDF vs Drive folder\n"
+                "• 2 Drive folder links (no PDF) — folder vs folder\n\n"
+                "*US vs UK:* attach US label first, UK label second."
             ),
         )
 
