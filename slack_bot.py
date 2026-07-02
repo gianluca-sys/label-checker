@@ -139,11 +139,11 @@ def _log_to_sheets(sku, name1, name2, result, mode):
         except gspread.WorksheetNotFound:
             pass
 
-        ws_sku = sh.add_worksheet(tab_name, rows=500, cols=5)
+        ws_sku = sh.add_worksheet(tab_name, rows=500, cols=6)
 
         # Row 1 — title
-        ws_sku.append_row([f"Label Check — {sku}", "", "", "", ""])
-        ws_sku.merge_cells("A1:E1")
+        ws_sku.append_row([f"Label Check — {sku}", "", "", "", "", ""])
+        ws_sku.merge_cells("A1:F1")
         ws_sku.format("A1", {
             "textFormat": {"bold": True, "fontSize": 14, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
             "backgroundColor": {"red": 0.176, "green": 0.416, "blue": 0.310},
@@ -155,15 +155,15 @@ def _log_to_sheets(sku, name1, name2, result, mode):
         src1_label  = "US Label" if uk_mode_log else "Source 1"
         src2_label  = "UK Label" if uk_mode_log else "Source 2"
         ws_sku.append_row([f"Run: {ts}", f"Mode: {mode}", f"{src1_label}: {name1}",
-                           f"{src2_label}: {name2}", f"Status: {status}"])
-        ws_sku.format("A2:E2", {
+                           f"{src2_label}: {name2}", f"Status: {status}", ""])
+        ws_sku.format("A2:F2", {
             "textFormat": {"italic": True, "fontSize": 10},
             "backgroundColor": {"red": 0.847, "green": 0.953, "blue": 0.863},
         })
 
         # Row 3 — column headers
-        ws_sku.append_row(["Category", "Field", src1_label, src2_label, "Status"])
-        ws_sku.format("A3:E3", {
+        ws_sku.append_row(["Category", "Field", src1_label, src2_label, "Status", "Notes"])
+        ws_sku.format("A3:F3", {
             "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
             "backgroundColor": {"red": 0.176, "green": 0.416, "blue": 0.310},
             "horizontalAlignment": "CENTER",
@@ -172,11 +172,10 @@ def _log_to_sheets(sku, name1, name2, result, mode):
 
         # Differences
         if result["differences"]:
-            ws_sku.append_row([f"CHANGES FOUND ({result['total_differences']})", "", "", "", ""])
-            section_row = ws_sku.row_count
+            ws_sku.append_row([f"CHANGES FOUND ({result['total_differences']})", "", "", "", "", ""])
             current_row_count = len(ws_sku.get_all_values())
-            ws_sku.merge_cells(f"A{current_row_count}:E{current_row_count}")
-            ws_sku.format(f"A{current_row_count}:E{current_row_count}", {
+            ws_sku.merge_cells(f"A{current_row_count}:F{current_row_count}")
+            ws_sku.format(f"A{current_row_count}:F{current_row_count}", {
                 "textFormat": {"bold": True, "foregroundColor": {"red": 0.8, "green": 0, "blue": 0}},
                 "backgroundColor": {"red": 1, "green": 0.9, "blue": 0.9},
                 "horizontalAlignment": "CENTER",
@@ -184,29 +183,27 @@ def _log_to_sheets(sku, name1, name2, result, mode):
 
             for d in result["differences"]:
                 row_num = len(ws_sku.get_all_values()) + 1
+                note_text = d.get("note", "")
                 ws_sku.append_row([d["category"], d["field"], d["current"], d["new"],
-                                   "CRITICAL" if d.get("critical") else "CHANGED"])
+                                   "CRITICAL" if d.get("critical") else "CHANGED",
+                                   note_text])
                 if d.get("critical"):
-                    ws_sku.format(f"A{row_num}:E{row_num}", {
+                    ws_sku.format(f"A{row_num}:F{row_num}", {
                         "backgroundColor": {"red": 1, "green": 0.878, "blue": 0.878},
                     })
                     ws_sku.format(f"E{row_num}", {
                         "textFormat": {"bold": True, "foregroundColor": {"red": 0.8, "green": 0, "blue": 0}},
                     })
                 else:
-                    ws_sku.format(f"A{row_num}:E{row_num}", {
+                    ws_sku.format(f"A{row_num}:F{row_num}", {
                         "backgroundColor": {"red": 1, "green": 1, "blue": 1},
                     })
-                if d.get("note"):
-                    try:
-                        note_row = len(ws_sku.get_all_values()) + 1
-                        ws_sku.append_row(["", f"Note: {d['note']}", "", "", ""])
-                        ws_sku.format(f"B{note_row}", {
-                            "textFormat": {"italic": True, "fontSize": 9,
-                                           "foregroundColor": {"red": 0.3, "green": 0.3, "blue": 0.6}},
-                        })
-                    except Exception:
-                        pass
+                if note_text:
+                    ws_sku.format(f"F{row_num}", {
+                        "textFormat": {"italic": True, "fontSize": 9,
+                                       "foregroundColor": {"red": 0.3, "green": 0.3, "blue": 0.6}},
+                        "wrapStrategy": "WRAP",
+                    })
 
 
 

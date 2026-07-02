@@ -74,8 +74,8 @@ Return ONLY a JSON object (no markdown fences, no explanation) with this structu
 }
 
 Rules:
-- nutrients: list every row in the exact order it appears; set dv_percent to null if absent.
-- ingredients: the full text of the 'Other Ingredients' or 'Ingredients' section (inactive/excipient ingredients). On UK labels this will include all ingredients.
+- nutrients: list every row in the exact order it appears; set dv_percent to null if absent; return dv_percent as a plain number only (e.g. "80", not "80%" or "80% DV").
+- ingredients: copy the FULL, COMPLETE text of the ingredients list, word for word — do NOT summarise, truncate, or paraphrase. US labels call this section "Other Ingredients" and list only excipients. UK labels have ONE combined "Ingredients" section that lists ALL ingredients (active + inactive together) — capture the entire thing.
 - allergens: full allergen or "Contains" statement, word for word. Include any allergen warnings embedded in the ingredients text.
 - suggested_use: full text of the 'Suggested Use', 'Directions', 'Recommended Use', or 'How To Use' section.
 - net_weight: the net quantity statement (e.g. "120 Capsules", "300g", "60 Servings").
@@ -320,9 +320,13 @@ def compare(d1, d2, mode="us_us"):
         current_val = _nutrient_str(n1_raw[orig1]) if orig1 else "(not present)"
         new_val     = _nutrient_str(n2_raw[orig2]) if orig2 else "(removed)"
 
-        # UK mode: compare amounts only, ignoring %DV vs %NRV/%RI
-        cmp_current = _amount_only(current_val) if uk_mode else current_val
-        cmp_new     = _amount_only(new_val)     if uk_mode else new_val
+        # UK mode: compare raw amount field only — ignore %DV vs %NRV entirely
+        if uk_mode:
+            cmp_current = (n1_raw[orig1].get("amount") or "").strip() if orig1 else "(not present)"
+            cmp_new     = (n2_raw[orig2].get("amount") or "").strip() if orig2 else "(removed)"
+        else:
+            cmp_current = current_val
+            cmp_new     = new_val
 
         entry = {"category": "Nutrient", "field": display_name,
                  "current": current_val, "new": new_val, "critical": True}
