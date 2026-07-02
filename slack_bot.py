@@ -197,6 +197,15 @@ def _log_to_sheets(sku, name1, name2, result, mode):
                     ws_sku.format(f"A{row_num}:E{row_num}", {
                         "backgroundColor": {"red": 1, "green": 1, "blue": 1},
                     })
+                if d.get("note"):
+                    note_row = len(ws_sku.get_all_values()) + 1
+                    ws_sku.append_row(["", f"ℹ️  {d['note']}", "", "", ""])
+                    ws_sku.merge_cells(f"B{note_row}:E{note_row}")
+                    ws_sku.format(f"A{note_row}:E{note_row}", {
+                        "textFormat": {"italic": True, "fontSize": 9,
+                                       "foregroundColor": {"red": 0.3, "green": 0.3, "blue": 0.6}},
+                        "backgroundColor": {"red": 0.94, "green": 0.94, "blue": 0.98},
+                    })
 
 
 

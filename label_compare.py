@@ -159,13 +159,39 @@ def _nutrient_str(n):
 
 
 def _norm(name):
-    """Normalise a nutrient name for fuzzy matching — lowercase, collapse whitespace and punctuation."""
+    """Normalise a nutrient name for fuzzy matching — lowercase, collapse whitespace, punctuation and dash variants."""
     name = name.lower().strip()
+    name = re.sub(r"\s*[–—]\s*", " ", name)   # em/en dash → space ("Buffered – from" → "Buffered from")
     name = re.sub(r"\s+", " ", name)
     name = re.sub(r"\s*\(\s*", "(", name)
     name = re.sub(r"\s*\)\s*", ")", name)
     name = re.sub(r"\s*,\s*", ",", name)
     return name
+
+
+_SUGGESTED_USE_SYNONYMS = [
+    (r"health[\s-]care", "healthcare"),
+    (r"\bpractitioner\b", "professional"),
+    (r"\bphysician\b", "professional"),
+    (r"\bphysicians\b", "professionals"),
+    (r"\bdoctor\b", "professional"),
+]
+
+
+def _norm_suggested_use(text):
+    """Normalise suggested-use text — ignore minor US/UK wording differences."""
+    text = (text or "").lower().strip()
+    for pattern, replacement in _SUGGESTED_USE_SYNONYMS:
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", text)
+
+
+def _extract_dosage(text):
+    """Extract the core dosage (amount + frequency) from a suggested-use string."""
+    text = (text or "").lower()
+    amounts   = re.findall(r"\d+\s*(?:capsule|tablet|softgel|gummy|ml|g|scoop|serving|pill)s?", text)
+    frequency = re.findall(r"(?:once|twice|\d+\s*times?)\s*(?:daily|a\s*day|per\s*day)", text)
+    return " ".join(amounts + frequency).strip()
 
 
 def _amount_only(s):
@@ -243,17 +269,28 @@ def compare(d1, d2, mode="us_us"):
             "critical": label in CRITICAL_FIELDS,
         }
 
-        # UK mode: ingredients structure differs by design — note it but still flag value changes
+        # UK mode: ingredients — show both in full, attach note separately
         if uk_mode and key == "ingredients":
+            entry["note"] = (
+                "UK labels combine active + inactive ingredients in one list — "
+                "structural differences are expected; check all ingredients are present"
+            )
             if v1 != v2:
-                entry["new"] = (
-                    f"{v2 or '(not present)'}\n"
-                    "ℹ️ Note: UK labels combine active + inactive ingredients in one list "
-                    "— structural differences are expected; check that all ingredients are present"
-                )
                 diffs.append(entry)
             else:
                 matches.append({**entry, "value": v1 or "(not present)"})
+            continue
+
+        # UK mode: suggested use — identical dosage = not a real difference
+        if uk_mode and key == "suggested_use":
+            if _norm_suggested_use(v1) == _norm_suggested_use(v2):
+                matches.append({**entry, "value": v1 or "(not present)"})
+            elif _extract_dosage(v1) and _extract_dosage(v1) == _extract_dosage(v2):
+                entry["critical"] = False
+                entry["note"] = "Dosage is identical — minor wording difference only"
+                diffs.append(entry)
+            else:
+                diffs.append(entry)
             continue
 
         if v1 != v2:
