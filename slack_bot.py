@@ -627,7 +627,8 @@ def trigger_run_checks():
             from run_checks import run
             run()
         except Exception as e:
-            print(f"Sheet run-checks error: {e}")
+            import traceback
+            print(f"Sheet run-checks error: {e}\n{traceback.format_exc()}")
 
     threading.Thread(target=_run, daemon=True).start()
     return jsonify({

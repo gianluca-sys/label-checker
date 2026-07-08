@@ -87,7 +87,7 @@ Rules:
 def extract(client, pdf_path):
     data = _b64(pdf_path)
     response = client.messages.create(
-        model="claude-opus-4-8",
+        model="claude-sonnet-4-6",
         max_tokens=4096,
         messages=[{
             "role": "user",

@@ -169,7 +169,7 @@ def _extract_images(ac, paths):
                          "source": {"type": "base64", "media_type": media_type, "data": data}})
     content.append({"type": "text", "text": WAREHOUSE_PROMPT})
     resp = ac.messages.create(
-        model="claude-opus-4-8", max_tokens=4096,
+        model="claude-sonnet-4-6", max_tokens=4096,
         messages=[{"role": "user", "content": content}],
     )
     text = resp.content[0].text
