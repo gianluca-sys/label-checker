@@ -43,6 +43,7 @@ from datetime import datetime
 from pathlib import Path
 
 import anthropic
+from flask import Flask, request, jsonify
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
@@ -56,12 +57,14 @@ SLACK_APP_TOKEN   = os.environ.get("SLACK_APP_TOKEN", "")
 GOOGLE_SHEET_ID   = os.environ.get("GOOGLE_SHEET_ID", "")
 GOOGLE_CREDS_FILE = os.environ.get("GOOGLE_CREDS_FILE", "google_credentials.json")
 GOOGLE_CREDS_JSON = os.environ.get("GOOGLE_CREDS_JSON", "")  # base64-encoded service account JSON (for cloud)
+API_SECRET_KEY    = os.environ.get("API_SECRET_KEY", "")     # shared secret for the /run-checks endpoint
 
 IMAGE_MIMETYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 IMAGE_EXTENSIONS = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
                     ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp"}
 
-app = App(token=SLACK_BOT_TOKEN)
+app      = App(token=SLACK_BOT_TOKEN)
+http_app = Flask(__name__)
 
 
 # ── Google credential loader (file on disk or base64 env var) ─────────────────
@@ -608,6 +611,31 @@ def handle_message(event, client):
         )
 
 
+# ── HTTP endpoints (for Google Sheets button) ──────────────────────────────────
+@http_app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok"})
+
+
+@http_app.route("/run-checks", methods=["POST"])
+def trigger_run_checks():
+    if API_SECRET_KEY and request.headers.get("X-API-Key") != API_SECRET_KEY:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    def _run():
+        try:
+            from run_checks import run
+            run()
+        except Exception as e:
+            print(f"Sheet run-checks error: {e}")
+
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({
+        "status": "queued",
+        "message": "Label checks started — results will appear in the sheet shortly.",
+    })
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     missing = [v for v in ("SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "ANTHROPIC_API_KEY")
@@ -615,5 +643,16 @@ if __name__ == "__main__":
     if missing:
         sys.exit(f"Error: missing environment variable(s): {', '.join(missing)}")
 
-    print("Healf Label Checker bot is running. Press Ctrl+C to stop.")
-    SocketModeHandler(app, SLACK_APP_TOKEN).start()
+    print("Starting Healf Label Checker…")
+
+    # Slack bot runs in a background thread (Socket Mode — no port required)
+    def _start_slack():
+        print("Slack bot connecting…")
+        SocketModeHandler(app, SLACK_APP_TOKEN).start()
+
+    threading.Thread(target=_start_slack, daemon=True).start()
+
+    # Flask HTTP server runs on main thread (Railway web service requires PORT)
+    port = int(os.environ.get("PORT", 8080))
+    print(f"HTTP server listening on port {port}…")
+    http_app.run(host="0.0.0.0", port=port, use_reloader=False)
