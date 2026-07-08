@@ -54,7 +54,7 @@ COL_RUN          = 14   # N  tick to queue
 COL_AUDIT_CHECK  = 15   # O  result written by script
 COL_COMMENTS     = 16   # P  detail written by script
 
-DRIVE_FILE_RE   = re.compile(r"[?&]id=([a-zA-Z0-9_-]+)")
+DRIVE_FILE_RE   = re.compile(r"(?:/file/d/|[?&]id=)([a-zA-Z0-9_-]+)")
 DRIVE_FOLDER_RE = re.compile(r"drive\.google\.com/drive/folders/([a-zA-Z0-9_-]+)")
 
 IMAGE_EXTENSIONS = {
