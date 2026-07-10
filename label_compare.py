@@ -208,6 +208,84 @@ def _amount_only(s):
     ).strip()
 
 
+# ── UK-specific comparison helpers ───────────────────────────────────────────
+
+# UK additive category names per GOV.UK approved additives list.
+# UK format: "anti-caking agent (magnesium stearate)" → substance is "magnesium stearate"
+_UK_ADDITIVE_CATEGORIES = [
+    "acidity regulator", "anti-caking agent", "anti-foaming agent",
+    "antioxidant", "bulking agent", "carrier solvent", "carrier",
+    "colour", "color", "emulsifying salt", "emulsifier",
+    "firming agent", "flavour enhancer", "flavor enhancer",
+    "flour treatment agent", "foaming agent", "gelling agent",
+    "glazing agent", "humectant", "modified starch", "packaging gas",
+    "preservative", "propellant", "raising agent", "sequestrant",
+    "stabiliser", "stabilizer", "sweetener", "thickener", "acid",
+]
+_UK_ADDITIVE_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(c) for c in sorted(_UK_ADDITIVE_CATEGORIES, key=len, reverse=True)) + r")\s*\(([^)]+)\)",
+    re.IGNORECASE,
+)
+
+# Nutrient names present on UK labels but never on US labels (expected absence)
+_UK_ONLY_NUTRIENT_NORMS = {"energy"}
+
+
+def _strip_additive_categories(text):
+    """'anti-caking agent (magnesium stearate)' → 'magnesium stearate'"""
+    return _UK_ADDITIVE_RE.sub(lambda m: m.group(1).strip(), text or "")
+
+
+def _norm_serving_size(s):
+    """Normalise serving size — ignore bracket/slash formatting and spacing."""
+    s = (s or "").lower().strip()
+    s = re.sub(r"[/()\[\]~]", " ", s)
+    s = re.sub(r"\s*([⅐-⅞¼-¾])\s*", r"\1", s)  # glue fraction chars
+    s = re.sub(r"\s+", " ", s)
+    return s.strip()
+
+
+def _norm_calories(s):
+    """Extract numeric calorie value — strips 'kcal', 'cal', units."""
+    return re.sub(r"[^\d.]", "", (s or "")).strip()
+
+
+def _norm_amount(s):
+    """Normalise amount string — remove space between number and unit: '20 g' → '20g'."""
+    s = (s or "").strip().lower()
+    s = re.sub(r"(\d)\s+(g|mg|mcg|µg|iu|ml)", r"\1\2", s)
+    return s
+
+
+def _extract_mg(amount_str):
+    """Extract milligram-equivalent numeric value from an amount string."""
+    s = (amount_str or "").strip().lower()
+    m = re.match(r"([\d.,]+)\s*(g|mg|mcg|µg)?", s)
+    if not m:
+        return None
+    val = float(m.group(1).replace(",", "."))
+    unit = (m.group(2) or "mg").strip()
+    if unit == "g":
+        return val * 1000
+    elif unit == "mg":
+        return val
+    elif unit in ("mcg", "µg"):
+        return val / 1000
+    return val
+
+
+def _salt_sodium_match(salt_amount, sodium_amount, tolerance=0.15):
+    """Return True if UK Salt matches US Sodium via Salt = Sodium × 2.5 conversion."""
+    salt_mg   = _extract_mg(salt_amount)
+    sodium_mg = _extract_mg(sodium_amount)
+    if salt_mg is None or sodium_mg is None:
+        return False
+    expected = sodium_mg * 2.5
+    if expected == 0:
+        return salt_mg == 0
+    return abs(salt_mg - expected) / expected <= tolerance
+
+
 # ── UK allergen helpers ────────────────────────────────────────────────────────
 # Each inner set = all name variants for one allergen family.
 _ALLERGEN_GROUPS = [
@@ -269,13 +347,31 @@ def compare(d1, d2, mode="us_us"):
             "critical": label in CRITICAL_FIELDS,
         }
 
-        # UK mode: ingredients — show both in full, attach note separately
+        # UK mode: serving size — ignore formatting differences
+        if uk_mode and key == "serving_size":
+            if _norm_serving_size(v1) == _norm_serving_size(v2):
+                matches.append({**entry, "value": v1 or "(not present)"})
+            else:
+                diffs.append(entry)
+            continue
+
+        # UK mode: calories — strip unit (UK shows "70 kcal", US shows "70")
+        if uk_mode and key == "calories":
+            if _norm_calories(v1) == _norm_calories(v2):
+                matches.append({**entry, "value": v1 or "(not present)"})
+            else:
+                diffs.append(entry)
+            continue
+
+        # UK mode: ingredients — strip additive category prefixes before comparing
         if uk_mode and key == "ingredients":
             entry["note"] = (
                 "UK labels combine active + inactive ingredients in one list — "
                 "structural differences are expected; check all ingredients are present"
             )
-            if v1 != v2:
+            v1_cmp = _strip_additive_categories(v1).lower()
+            v2_cmp = _strip_additive_categories(v2).lower()
+            if v1_cmp != v2_cmp:
                 diffs.append(entry)
             else:
                 matches.append({**entry, "value": v1 or "(not present)"})
@@ -313,6 +409,55 @@ def compare(d1, d2, mode="us_us"):
             continue
         seen[norm_key] = True
 
+        # UK mode: skip Energy rows — mandatory on UK labels, never present on US labels
+        if uk_mode and any(norm_key.startswith(e) for e in _UK_ONLY_NUTRIENT_NORMS):
+            orig1 = n1_norm.get(norm_key)
+            if orig1:
+                matches.append({
+                    "category": "Nutrient",
+                    "field": orig1,
+                    "value": _nutrient_str(n1_raw[orig1]),
+                    "current": _nutrient_str(n1_raw[orig1]),
+                    "new": "(UK-only mandatory field — not required on US labels ✓)",
+                    "critical": False,
+                })
+            continue
+
+        # UK mode: Salt (UK) ↔ Sodium (US) — compare using Salt = Sodium × 2.5
+        if uk_mode and norm_key == "salt":
+            orig1 = n1_norm.get("salt")
+            orig2 = n2_norm.get("sodium")
+            seen["sodium"] = True
+            salt_amt   = (n1_raw[orig1].get("amount") or "") if orig1 else ""
+            sodium_amt = (n2_raw[orig2].get("amount") or "") if orig2 else ""
+            entry = {
+                "category": "Nutrient", "field": "Salt / Sodium", "critical": True,
+                "current": f"Salt: {_nutrient_str(n1_raw[orig1])}" if orig1 else "(Salt not on UK label)",
+                "new":     f"Sodium: {_nutrient_str(n2_raw[orig2])}" if orig2 else "(Sodium not on US label)",
+            }
+            if orig1 and orig2:
+                if _salt_sodium_match(salt_amt, sodium_amt):
+                    entry["note"] = f"Salt {salt_amt} ≈ Sodium {sodium_amt} × 2.5 ✓"
+                    matches.append({**entry, "value": entry["current"]})
+                else:
+                    entry["note"] = "Salt ≠ Sodium × 2.5 — check conversion"
+                    diffs.append(entry)
+            else:
+                diffs.append(entry)
+            continue
+
+        # UK mode: skip Sodium if it appears without a paired Salt row
+        if uk_mode and norm_key == "sodium":
+            orig2 = n2_norm.get("sodium")
+            if orig2:
+                diffs.append({
+                    "category": "Nutrient", "field": "Salt / Sodium", "critical": True,
+                    "current": "(Salt not found on UK label — verify)",
+                    "new": f"Sodium: {_nutrient_str(n2_raw[orig2])}",
+                    "note": "UK labels use 'Salt' not 'Sodium' — check if Salt row is present",
+                })
+            continue
+
         orig1 = n1_norm.get(norm_key)
         orig2 = n2_norm.get(norm_key)
         display_name = orig1 or orig2
@@ -320,10 +465,10 @@ def compare(d1, d2, mode="us_us"):
         current_val = _nutrient_str(n1_raw[orig1]) if orig1 else "(not present)"
         new_val     = _nutrient_str(n2_raw[orig2]) if orig2 else "(removed)"
 
-        # UK mode: compare raw amount field only — ignore %DV vs %NRV entirely
+        # UK mode: compare normalised amounts — ignore %DV vs %NRV and spacing
         if uk_mode:
-            cmp_current = (n1_raw[orig1].get("amount") or "").strip() if orig1 else "(not present)"
-            cmp_new     = (n2_raw[orig2].get("amount") or "").strip() if orig2 else "(removed)"
+            cmp_current = _norm_amount(n1_raw[orig1].get("amount") or "") if orig1 else "(not present)"
+            cmp_new     = _norm_amount(n2_raw[orig2].get("amount") or "") if orig2 else "(removed)"
         else:
             cmp_current = current_val
             cmp_new     = new_val
